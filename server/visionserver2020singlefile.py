@@ -25,7 +25,7 @@ two_pi = 2 * math.pi
 pi_by_2 = math.pi / 2
 
 #image size ratioed to 16:9
-IMAGE_WIDTH = 416
+IMAGE_WIDTH = 424
 IMAGE_HEIGHT = 240
 CAMERA_FPS = 20
 OUTPUT_FPS_LIMIT = 15
@@ -62,7 +62,10 @@ verticalView = math.atan(math.tan(diagonalView/2) * (verticalAspect / diagonalAs
 H_FOCAL_LENGTH = IMAGE_WIDTH / (2*math.tan((horizontalView/2)))
 V_FOCAL_LENGTH = IMAGE_HEIGHT / (2*math.tan((verticalView/2)))
 
-CALIB_STRING = '{"camera_matrix": [[374.32651400661666, 0.0, 208.1795122696603], [0.0, 374.0335899317395, 109.18785178761078], [0.0, 0.0, 1.0]], "distortion": [[0.11576562153880979, -0.8049683080723996, 0.0013190574515076887, 0.0014151850466233517, 1.1683306729610425]]}'
+#CALIB_STRING = '{"camera_matrix": [[374.32651400661666, 0.0, 208.1795122696603], [0.0, 374.0335899317395, 109.18785178761078], [0.0, 0.0, 1.0]], "distortion": [[0.11576562153880979, -0.8049683080723996, 0.0013190574515076887, 0.0014151850466233517, 1.1683306729610425]]}'
+#CALIB_STRING = '{"camera_matrix": [[174.59631490154996, 0.0, 204.06067374445195], [0.0, 171.8900374073426, 49.797851023160234], [0.0, 0.0, 1.0]], "distortion": [[-0.0028047643695765546, 0.005030929501413801, -0.00418289030526314, -0.0026789800621453896, -0.00281275201996673]]}'  #20200229m
+CALIB_STRING = '{"camera_matrix": [[428.6980048244047, 0.0, 214.40193947713368], [0.0, 425.7501289952879, 91.94700682430316], [0.0, 0.0, 1.0]], "distortion": [[0.6850803943638851, -6.057680289435895, 0.013676112211948982, -0.0007726317137721686, 15.244322530009654]]}'
+C930E_CALIB_STRING = '{"camera_matrix": [[257.64544796248464, 0.0, 209.408398407944], [0.0, 258.1095404990428, 119.91831227387262], [0.0, 0.0, 1.0]], "distortion": [[0.07941072961742286, -0.20643561157601545, 6.806679344019089e-05, -0.00048416887625856066, 0.08253834888278783]]}'
 
 # RMS: 0.1829526978177933
 # camera matrix:
@@ -586,8 +589,8 @@ class BallFinder2020(GenericFinder):
     VP_HALF_WIDTH = math.tan(math.radians(HFOV)/2.0)  # view plane 1/2 height
     VP_HALF_HEIGHT = math.tan(math.radians(VFOV)/2.0)  # view plane 1/2 width
 
-    def __init__(self, CALIB_STRING):
-        super().__init__('ballfinder', camera='intake', finder_id=2.0, exposure=0)
+    def __init__(self, CALIB_STRING, name='ballfinder', camera='shooter', finder_id=2.0, exposure=0):
+        super().__init__(name=name, camera=camera, finder_id=finder_id, exposure=exposure)
 
         # Color threshold values, in HSV space
         self.low_limit_hsv = BALL_LOW_HSV
@@ -612,8 +615,8 @@ class BallFinder2020(GenericFinder):
             self.cameraMatrix = numpy.array(json_data["camera_matrix"])
             self.distortionMatrix = numpy.array(json_data["distortion"])
 
-        self.tilt_angle = FLOOR_CAMERA_ANGLE = 0 # math.radians(-7.5)  # camera mount angle (radians)
-        self.camera_height = 19.0            # height of camera off the ground (inches)
+        self.tilt_angle = math.radians(-7.5)  #FLOOR_CAMERA_ANGLE #  camera mount angle (radians)
+        self.camera_height = 15.50            # height of camera off the ground (inches)
         self.target_height = 0.0             # height of target off the ground (inches)
 
         return
@@ -920,8 +923,8 @@ class BallFinder2020(GenericFinder):
 
     def process_image(self, camera_frame):
         '''Main image processing routine'''
-        r = self.process_image_simple(camera_frame)
-        print("Simple Result: ", r)
+        # r = self.process_image_simple(camera_frame)
+        # print("Simple Result: ", r)
         return self.process_image_2877(camera_frame)
 
 
@@ -1132,28 +1135,31 @@ class VisionServer:
 
     # NetworkTable parameters
 
-    # this will be under /SmartDashboard, but the SendableChooser code does not allow full paths
-    ACTIVE_MODE_KEY = "vision/active_mode"
+    # this will be under , but the SendableChooser code does not allow full paths
+    ACTIVE_MODE_KEY = "/vision/active_mode"
 
+
+
+    nt_active_mode = ntproperty(ACTIVE_MODE_KEY, "c930e")
     # frame rate is pretty variable, so set this a fair bit higher than what you really want
     # using a large number for no limit
-    output_fps_limit = ntproperty('/SmartDashboard/vision/output_fps_limit', OUTPUT_FPS_LIMIT,
+    output_fps_limit = ntproperty('/vision/output_fps_limit', OUTPUT_FPS_LIMIT,
                                   doc='FPS limit of frames sent to MJPEG server')
 
     # fix the TCP port for the main video, so it does not change with multiple cameras
-    output_port = ntproperty('/SmartDashboard/vision/output_port', 1190,
+    output_port = ntproperty('/vision/output_port', 1190,
                              doc='TCP port for main image output')
 
     # Operation modes. Force the value on startup.
-    tuning = ntproperty('/SmartDashboard/vision/tuning', False, writeDefault=True,
+    tuning = ntproperty('/vision/tuning', False, writeDefault=True,
                         doc='Tuning mode. Reads processing parameters each time.')
 
     # Logitech c930 are wide-screen cameras, so 320x180 has the biggest FOV
-    image_width = ntproperty('/SmartDashboard/vision/width', IMAGE_WIDTH, writeDefault=False, doc='Image width')
-    image_height = ntproperty('/SmartDashboard/vision/height', IMAGE_HEIGHT, writeDefault=False, doc='Image height')
-    camera_fps = ntproperty('/SmartDashboard/vision/fps', CAMERA_FPS, writeDefault=False, doc='FPS from camera')
+    image_width = ntproperty('/vision/width', IMAGE_WIDTH, writeDefault=False, doc='Image width')
+    image_height = ntproperty('/vision/height', IMAGE_HEIGHT, writeDefault=False, doc='Image height')
+    camera_fps = ntproperty('/vision/fps', CAMERA_FPS, writeDefault=False, doc='FPS from camera')
 
-    image_writer_state = ntproperty('/SmartDashboard/vision/write_images', False, writeDefault=True,
+    image_writer_state = ntproperty('/vision/write_images', False, writeDefault=True,
                                     doc='Turn on saving of images')
 
     # Targeting info sent to RoboRio
@@ -1161,7 +1167,7 @@ class VisionServer:
     #  all arrive at the RoboRio at the same time.
     # Value is (time, success, finder_id, distance, angle1, angle2) as a flat array.
     # All values are floating point (required by NT).
-    target_info = ntproperty('/SmartDashboard/vision/target_info', 6 * [0.0, ],
+    target_info = ntproperty('/vision/target_info', 6 * [0.0, ],
                              doc='Packed array of target info: time, success, finder_id, distance, angle1, angle2')
 
     def __init__(self, initial_mode, test_mode=False):
@@ -1188,7 +1194,6 @@ class VisionServer:
         # Initial mode for start of match.
         # VisionServer switches to this mode after a second, to get the cameras initialized
         self.initial_mode = initial_mode
-        self.nt_active_mode = self.initial_mode
 
         # SendableChooser creates a dropdown chooser in ShuffleBoard
         # self.mode_chooser = SendableChooser()
@@ -1332,17 +1337,6 @@ class VisionServer:
 
         return
 
-    def add_target_finder(self, finder):
-        n = finder.name
-        logging.info("Adding target finder '{}' id {}".format(n, finder.finder_id))
-        self.target_finders[n] = finder
-        NetworkTables.getEntry('/SmartDashboard/' + self.ACTIVE_MODE_KEY + '/options').setStringArray(self.target_finders.keys())
-
-        if n == self.initial_mode:
-            NetworkTables.getEntry('/SmartDashboard/' + self.ACTIVE_MODE_KEY + '/default').setString(n)
-            # self.mode_chooser_ctrl.setSelected(n)
-        return
-
     def switch_mode(self, new_mode):
         '''Switch processing mode. new_mode is the string name'''
 
@@ -1435,28 +1429,25 @@ class VisionServer:
         # NetworkTables.addEntryListener(self.active_mode_changed)
         # old_ts = datetime.timestamp(datetime.now())
         # mode_idx=2
-        # mode = ["shooter", "intake", "ballfinder", "goalfinder"]
-        # mode_period = [5, 5, 40, 40]
+        # mode = ["shooter", "intake", "ballfinder", "goalfinder", "c930e"]
+        # mode_period = [5, 5, 40, 5, 40]
 
 
         while True:
             try:
                 # Check whether DS has asked for a different camera
-                # ntmode = self.nt_active_mode  # temp, for efficiency
-                # ntmode = self.mode_chooser_ctrl.getSelected()
-                # if ntmode != self.active_mode:
-                #     self.switch_mode(ntmode)
-
-                # if self.camera_frame is None:
-                # #     self.preallocate_arrays()
 
                 # now = datetime.now()
                 # timestamp = datetime.timestamp(now)
-                # if timestamp - old_ts > mode_period[(mode_idx -1 ) % 4] :
-                #     self.switch_mode(mode[mode_idx % 4])
+                # if timestamp - old_ts > mode_period[(mode_idx -1 ) % 5] :
+                #     self.switch_mode(mode[mode_idx % 5])
                 #     mode_idx += 1
                 #     old_ts = timestamp
 
+                nt_mode = nt_active_mode
+
+                if nt_mode != self.active_mode:
+                    self.switch_mode(nt_mode)
 
                 if self.tuning:
                     self.update_parameters()
@@ -1571,7 +1562,7 @@ class VisionServer:
     def active_mode_changed(key, value, isNew, isParamNew):
         print("valueChanged: key: '%s'; value: %s; isNew: %s; isParamNew: %s" % (key, value, isNew, isParamNew))
 
-        if value == "/SmartDashboard/vision/active_mode":
+        if value == "/vision/active_mode":
             self.switch_mode(value)
 
 # -----------------------------------------------------------------------------
@@ -1641,17 +1632,18 @@ def main(server_type):
     return
 
 class VisionServer2020(VisionServer):
-    ACTIVE_MODE_KEY = "vision/active_mode"
+    ACTIVE_MODE_KEY = "/vision/active_mode"
 
     # Retro-reflective target finding parameters
 
-    # rrtarget_exposure = ntproperty('/SmartDashboard/vision/rrtarget/exposure', 0, doc='Camera exposure for rrtarget (0=auto)')
+    # rrtarget_exposure = ntproperty('/vision/rrtarget/exposure', 0, doc='Camera exposure for rrtarget (0=auto)')
 
     def __init__(self, CALIB_STRING, test_mode=False):
-        super().__init__(initial_mode='ballfinder', test_mode=test_mode)
+        super().__init__(initial_mode='c930e', test_mode=test_mode)
 
         self.camera_device_shooter = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-video-index0'    # for line and hatch processing
         self.camera_device_intake = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-video-index0'    # for line and hatch processing
+        self.camera_device_c930e = '/dev/v4l/by-id/usb-046d_Logitech_Webcam_C930e_9A1D132E-video-index0'
         self.add_cameras()
 
         self.generic_finder = GenericFinder("shooter", "shooter", finder_id=4.0)
@@ -1666,10 +1658,14 @@ class VisionServer2020(VisionServer):
         self.ball_finder = BallFinder2020(CALIB_STRING)
         self.add_target_finder(self.ball_finder)
 
+        self.c930e_finder = BallFinder2020(C930E_CALIB_STRING, 'c930e', 'c930e', finder_id=3.0)
+        self.add_target_finder(self.c930e_finder)
+
+
         self.update_parameters()
 
         # start in intake mode to get cameras going. Will switch to 'shooter' after 1 sec.
-        self.switch_mode('ballfinder')
+        self.switch_mode('c930e')
         return
 
     def update_parameters(self):
@@ -1688,6 +1684,7 @@ class VisionServer2020(VisionServer):
 
         self.add_camera('shooter', self.camera_device_shooter, True)
         self.add_camera('intake', self.camera_device_intake, False)
+        self.add_camera('c930e', self.camera_device_c930e, False)
         return
 
 # Main routine
