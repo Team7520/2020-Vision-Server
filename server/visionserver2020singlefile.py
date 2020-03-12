@@ -474,6 +474,163 @@ class ThreadedCamera:
         time.sleep(0.3)         # time for thread to stop (proper way???)
         return
 
+class Camera:
+    '''Wrapper for camera related functionality.
+    Makes handling different camera models easier
+    Includes a threaded reader, so you can grab a frame without waiting, if needed'''
+
+    def __init__(self, camera_server, name, device, height=240, fps=30, width=320, rotation=0,
+                 threaded=False):
+        '''Create a USB camera and configure it.
+        Note: rotation is an angle: 0, 90, 180, -90'''
+
+        self.width = int(width)
+        self.height = int(height)
+        self.rot90_count = (rotation // 90) % 4  # integer division
+
+        self.camera = cscore.UsbCamera(name, device)
+        camera_server.startAutomaticCapture(camera=self.camera)
+        # keep the camera open for faster switching
+        self.camera.setConnectionStrategy(cscore.VideoSource.ConnectionStrategy.kKeepOpen)
+
+        self.camera.setResolution(self.width, self.height)
+        self.camera.setFPS(int(fps))
+
+        # set the camera for no auto focus, focus at infinity
+        # NOTE: order does matter
+        self.set_property('focus_auto', 0)
+        self.set_property('focus_absolute', 0)
+
+        mode = self.camera.getVideoMode()
+        logging.info("camera '%s' pixel format = %s, %dx%d, %dFPS", name,
+                     mode.pixelFormat, mode.width, mode.height, mode.fps)
+
+        # Variables for the threaded read loop
+        self.sink = camera_server.getVideo(camera=self.camera)
+
+        self.calibration_matrix = None
+        self.distortion_matrix = None
+
+        self.threaded = threaded
+        self.frametime = None
+        self.camera_frame = None
+        self.stopped = False
+        self.frame_number = 0
+        self.last_read = 0
+
+        return
+
+    def get_name(self):
+        return self.camera.getName()
+
+    def set_exposure(self, value):
+        '''Set the camera exposure. 0 means auto exposure'''
+
+        logging.info(f"Setting camera exposure to '{value}'")
+        if value == 0:
+            self.camera.setExposureAuto()
+            # Logitech does not like having exposure_auto_priority on when the light is poor
+            #  slows down the frame rate
+            # camera.getProperty('exposure_auto_priority').set(1)
+        else:
+            self.camera.setExposureManual(int(value))
+            # camera.getProperty('exposure_auto_priority').set(0)
+        return
+
+    def set_property(self, name, value):
+        '''Set a camera property, such as auto_focus'''
+
+        logging.info(f"Setting camera property '{name}' to '{value}'")
+        try:
+            try:
+                propVal = int(value)
+            except ValueError:
+                self.camera.getProperty(name).setString(value)
+            else:
+                self.camera.getProperty(name).set(propVal)
+        except Exception as e:
+            logging.warn("Unable to set property '{}': {}".format(name, e))
+
+        return
+
+    def start(self):
+        '''Start the thread to read frames from the video stream'''
+
+        if self.threaded:
+            t = Thread(target=self.update, args=())
+            t.daemon = True
+            t.start()
+        return
+
+    def update(self):
+        '''Threaded read loop'''
+
+        fps_startt = time.time()
+
+        while True:
+            # if the thread indicator variable is set, stop the thread
+            if self.stopped:
+                return
+
+            # otherwise, read the next frame from the stream
+            self._read_one_frame()
+
+            if self.frame_number % 150 == 0:
+                endt = time.time()
+                dt = endt - fps_startt
+                logging.info("threadedcamera: 150 frames in {0:.3f} seconds = {1:.2f} FPS".format(dt, 150.0 / dt))
+                fps_startt = endt
+        return
+
+    def next_frame(self):
+        '''Wait for a new frame'''
+
+        if self.threaded:
+            while self.last_read == self.frame_number:
+                sleep(0.001)
+            self.last_read = self.frame_number
+        else:
+            self._read_one_frame()
+
+        return self.frametime, self.camera_frame
+
+    def get_frame(self):
+        '''Return the frame most recently read, no waiting. This may be a repeat of the previous image.'''
+
+        if not self.threaded:
+            raise Exception("Called get_frame on a non-threaded reader")
+
+        return self.frametime, self.camera_frame
+
+    def _read_one_frame(self):
+        self.frametime, self.camera_frame = self.sink.grabFrame(self.camera_frame)
+        self.frame_number += 1
+
+        if self.rot90_count and self.frametime > 0:
+            # Numpy is *much* faster than the OpenCV routine
+            self.camera_frame = rot90(self.camera_frame, self.rot90_count)
+        return
+
+    def stop(self):
+        # indicate that the thread should be stopped
+        self.stopped = True
+        sleep(0.3)         # time for thread to stop (proper way???)
+        return
+
+
+class LogitechC930e(Camera):
+    def __init__(self, camera_server, name, device, height=240, fps=30, width=None, rotation=0, threaded=False):
+        if not width:
+            width = 424 if height == 240 else 848
+
+        super().__init__(camera_server, name, device, height=height, fps=fps, width=width, rotation=rotation, threaded=threaded)
+
+        # Logitech does not like having exposure_auto_priority on when the light is poor
+        #  slows down the frame rate
+        self.set_property('exposure_auto_priority', 0)
+
+        return
+        
 class GenericFinder:
     def __init__(self, name, camera, finder_id=1.0, exposure=0, rotation=None, line_coords=None):
         self.name = name
@@ -483,6 +640,7 @@ class GenericFinder:
         self.exposure = exposure
         self.rotation = rotation            # cv2.ROTATE_90_CLOCKWISE = 0, cv2.ROTATE_180 = 1, cv2.ROTATE_90_COUNTERCLOCKWISE = 2
         self.line_coords = line_coords      # coordinates to draw a line on the image
+        self.startAt = 0
         return
 
     def process_image(self, camera_frame):
@@ -503,6 +661,10 @@ class GenericFinder:
             cv2.line(output_frame, self.line_coords[0], self.line_coords[1], (255, 255, 255), 2)
 
         return output_frame
+
+    def set_start_time():
+
+        self.startAt = datetime.timestamp(datetime.now())
 
     # ----------------------------------------------------------------------
     # the routines below are not needed here, but are used by lots of Finders,
@@ -552,7 +714,6 @@ class GenericFinder:
         angle = (numpy.arctan2(-d[:, 1], d[:, 0]) - pi_by_2) % two_pi
         return contour[numpy.argsort(angle)]
 
-
     @staticmethod
     def major_minor_axes(moments):
         '''Compute the major/minor axes and orientation of an object from the moments'''
@@ -578,6 +739,39 @@ class GenericFinder:
 
         return major, minor, angle
 
+class CountDownFinder(GenericFinder):
+    def __init__(self, name, camera, finder_id=6.0, exposure=0, rotation=None, line_coords=None):
+        self.name = name
+        self.finder_id = float(finder_id)   # id needs to be float! "id" is a reserved word.
+        self.camera = camera                # string with camera name
+        self.stream_camera = None           # None means same camera
+        self.exposure = exposure
+        self.rotation = rotation            # cv2.ROTATE_90_CLOCKWISE = 0, cv2.ROTATE_180 = 1, cv2.ROTATE_90_COUNTERCLOCKWISE = 2
+        self.line_coords = line_coords      # coordinates to draw a line on the image
+        return
+
+    def prepare_output_image(self, input_frame):
+        '''Prepare output image for drive station. Rotate image if needed, otherwise nothing to do.'''
+        # WARNING rotation=0 is actually 90deg clockwise (dumb!!)
+        if self.rotation is not None:
+            # rotate function makes a copy, so no need to do that ahead.
+            output_frame = cv2.rotate(input_frame, self.rotation)
+        else:
+            output_frame = input_frame.copy()
+        if self.line_coords is not None:
+            cv2.line(output_frame, self.line_coords[0], self.line_coords[1], (255, 255, 255), 2)
+
+        current_dt = datetime.timestamp(datetime.now())
+        dt = 40 - (current_dt - self.startAt)
+        if dt < 0 :
+            dt=0
+
+
+        cv2.putText(output_frame, "{0:.1f} seconds".format(dt), (5, output_frame.shape[0]-5), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.75, (0, 255, 255), thickness=2)
+
+        return output_frame
+
 class BallFinder2020(GenericFinder):
     '''Ball finder for Infinite Recharge 2020'''
 
@@ -589,7 +783,7 @@ class BallFinder2020(GenericFinder):
     VP_HALF_WIDTH = math.tan(math.radians(HFOV)/2.0)  # view plane 1/2 height
     VP_HALF_HEIGHT = math.tan(math.radians(VFOV)/2.0)  # view plane 1/2 width
 
-    def __init__(self, CALIB_STRING, name='ballfinder', camera='shooter', finder_id=2.0, exposure=0):
+    def __init__(self, CALIB_STRING, name='intake', camera='intake', finder_id=2.0, exposure=0):
         super().__init__(name=name, camera=camera, finder_id=finder_id, exposure=exposure)
 
         # Color threshold values, in HSV space
@@ -616,7 +810,7 @@ class BallFinder2020(GenericFinder):
             self.distortionMatrix = numpy.array(json_data["distortion"])
 
         self.tilt_angle = math.radians(-7.5)  #FLOOR_CAMERA_ANGLE #  camera mount angle (radians)
-        self.camera_height = 15.50            # height of camera off the ground (inches)
+        self.camera_height = 31 #15.50            # height of camera off the ground (inches)
         self.target_height = 0.0             # height of target off the ground (inches)
 
         return
@@ -655,7 +849,7 @@ class BallFinder2020(GenericFinder):
         # corrected expression.
         # As horizontal angle gets larger, real vertical angle gets a little smaller
         ay = math.atan2(y * math.cos(ax), 1.0)     # vertical angle
-        # print("ax, ay", math.degrees(ax), math.degrees(ay))
+        logging.info("ax, ay: {}, {}".format(math.degrees(ax), math.degrees(ay)))
 
         # now use the x and y angles to calculate the distance to the target:
         d = (self.target_height - self.camera_height) / math.tan(self.tilt_angle + ay)    # distance to the target
@@ -686,7 +880,7 @@ class BallFinder2020(GenericFinder):
         # corrected expression.
         # As horizontal angle gets larger, real vertical angle gets a little smaller
         ay = math.atan2(y_prime * math.cos(ax), 1.0)     # vertical angle
-        # print("ax, ay", math.degrees(ax), math.degrees(ay))
+        logging.info("ax, ay: {}, {}".format(math.degrees(ax), math.degrees(ay)))
 
         # now use the x and y angles to calculate the distance to the target:
         d = (self.target_height - self.camera_height) / math.tan(self.tilt_angle + ay)    # distance to the target
@@ -954,8 +1148,8 @@ class GoalFinder2020(GenericFinder):
         [TARGET_TOP_WIDTH / 2, TARGET_HEIGHT / 2, 0.0]
     ])
 
-    def __init__(self, CALIB_STRING):
-        super().__init__('goalfinder', camera='shooter', finder_id=1.0, exposure=1)
+    def __init__(self, CALIB_STRING, name='shooter', camera='shooter', finder_id=1.0, exposure=1):
+        super().__init__(name=name, camera=camera, finder_id=finder_id, exposure=exposure)
 
         # Color threshold values, in HSV space
         self.low_limit_hsv = GOAL_LOW_HSV
@@ -1067,7 +1261,7 @@ class GoalFinder2020(GenericFinder):
                 return result
 
         # no target found. Return "failure"
-        return [0.0, self.finder_id, 0.0, 0.0, 0.0, 0.0, 0.0]
+        return [0.0, self.finder_id, 0.0, 0.0, 0.0, -1.0, -1.0]
 
     def prepare_output_image(self, input_frame):
         '''Prepare output image for drive station. Draw the found target contour.'''
@@ -1117,7 +1311,7 @@ class GoalFinder2020(GenericFinder):
         z = math.sin(self.tilt_angle) * tvec[1][0] + math.cos(self.tilt_angle) * tvec[2][0]
 
         # distance in the horizontal plane between camera and target
-        distance = math.sqrt(x**2 + z**2)
+        distance = math.sqrt(x**2 + z**2) / 1.07
 
         # horizontal angle between camera center line and target
         angle1 = math.atan2(x, z)
@@ -1137,10 +1331,8 @@ class VisionServer:
 
     # this will be under , but the SendableChooser code does not allow full paths
     ACTIVE_MODE_KEY = "/vision/active_mode"
+    nt_active_mode = ntproperty(ACTIVE_MODE_KEY, "shooter")
 
-
-
-    nt_active_mode = ntproperty(ACTIVE_MODE_KEY, "c930e")
     # frame rate is pretty variable, so set this a fair bit higher than what you really want
     # using a large number for no limit
     output_fps_limit = ntproperty('/vision/output_fps_limit', OUTPUT_FPS_LIMIT,
@@ -1181,8 +1373,6 @@ class VisionServer:
         self.camera_server = cscore.CameraServer.getInstance()
         self.camera_server.enableLogging()
 
-        self.video_readers = {}
-        self.current_reader = None
         self.cameras = {}
         self.active_camera = None
 
@@ -1260,82 +1450,38 @@ class VisionServer:
 
         return
 
-    @staticmethod
-    def set_exposure(camera, value):
-        logging.info("Setting camera exposure to '%d'" % value)
-        if value == 0:
-            camera.setExposureAuto()
-            camera.getProperty('exposure_auto_priority').set(1)
-        else:
-            camera.setExposureManual(int(value))
-            camera.getProperty('exposure_auto_priority').set(0)
-        return
-
-    @staticmethod
-    def set_camera_property(camera, name, value):
-        '''Set a camera property, such as auto_focus'''
-
-        logging.info("Setting camera property '{}' to '{}'".format(name, value))
-        try:
-            try:
-                propVal = int(value)
-            except ValueError:
-                camera.getProperty(name).setString(value)
-            else:
-                camera.getProperty(name).set(propVal)
-        except Exception as e:
-            logging.warn("Unable to set property '{}': {}".format(name, e))
-
-        return
-
-    def add_camera(self, name, device, active=True):
+    def add_camera(self, camera, active=True):
         '''Add a single camera and set it to active/disabled as indicated.
         Cameras are referenced by their name, so pick something unique'''
 
-        camera = cscore.UsbCamera(name, device)
-        # remember the camera object, in case we need to adjust it (eg the exposure)
-        self.cameras[name] = camera
-
-        self.camera_server.startAutomaticCapture(camera=camera)
-
-        # PS Eye camera needs to have its pixelformat set
-        # camera.setPixelFormat(cscore.VideoMode.PixelFormat.kYUYV)
-
-        camera.setResolution(int(self.image_width), int(self.image_height))
-        camera.setFPS(int(self.camera_fps))
-
-        # keep the camera open for faster switching
-        camera.setConnectionStrategy(cscore.VideoSource.ConnectionStrategy.kKeepOpen)
-
-        # set the camera for no auto focus, focus at infinity
-        # TODO: different cameras have different properties
-        # NOTE: order does matter
-        VisionServer.set_camera_property(camera, 'focus_auto', 0)
-        VisionServer.set_camera_property(camera, 'focus_absolute', 0)
-
-        mode = camera.getVideoMode()
-        logging.info("camera '%s' pixel format = %s, %dx%d, %dFPS", name,
-                     mode.pixelFormat, mode.width, mode.height, mode.fps)
-
-        reader = ThreadedCamera(self.camera_server.getVideo(camera=camera)).start()
-        self.video_readers[name] = reader
+        self.cameras[camera.get_name()] = camera
+        camera.start()          # start read thread
         if active:
-            self.current_reader = reader
-            self.active_camera = name
+            self.active_camera = camera
 
         return
 
     def switch_camera(self, name):
         '''Switch the active camera, and disable the previously active one'''
 
-        new_reader = self.video_readers.get(name, None)
-        if new_reader is not None:
-            self.current_reader = new_reader
-            self.active_camera = name
+        new_camera = self.cameras.get(name, None)
+        if new_camera is not None:
+            self.active_camera = new_camera
         else:
             logging.error('Unknown camera %s' % name)
 
         return
+
+    def add_target_finder(self, finder):
+        n = finder.name
+        logging.info("Adding target finder '{}' id {}".format(n, finder.finder_id))
+        self.target_finders[n] = finder
+        # NetworkTables.getEntry(self.ACTIVE_MODE_KEY + '/options').setStringArray(self.target_finders.keys())
+
+        # if n == self.initial_mode:
+        #     NetworkTables.getEntry(self.ACTIVE_MODE_KEY + '/default').setString(n)
+        #     self.mode_chooser_ctrl.setSelected(n)
+        return        
 
     def switch_mode(self, new_mode):
         '''Switch processing mode. new_mode is the string name'''
@@ -1344,11 +1490,13 @@ class VisionServer:
             logging.info("Switching mode to '%s'" % new_mode)
             finder = self.target_finders.get(new_mode, None)
             if finder is not None:
-                if self.active_camera != finder.camera:
+                if self.active_camera.get_name() != finder.camera:
                     self.switch_camera(finder.camera)
 
                 self.curr_finder = finder
-                self.set_exposure(self.cameras[finder.camera], finder.exposure)
+                #finder.set_start_time()
+                finder.startAt = datetime.timestamp(datetime.now())
+                self.active_camera.set_exposure(finder.exposure)
                 self.active_mode = new_mode
             else:
                 logging.error("Unknown mode '%s'" % new_mode)
@@ -1373,6 +1521,9 @@ class VisionServer:
         '''Create the image to send to the Driver station.
         Finder is expected to *copy* the input image, as needed'''
 
+        if self.camera_frame is None:
+            return
+
         try:
             if self.curr_finder is None:
                 self.output_frame = self.camera_frame.copy()
@@ -1388,8 +1539,15 @@ class VisionServer:
 
                 self.output_frame = self.curr_finder.prepare_output_image(base_frame)
 
-            image_shape = self.output_frame.shape
-            if image_shape[0] < 400:  # test on height
+            min_dim = min(self.output_frame.shape[0:2])
+
+            # Rescale if needed
+            if min_dim > 400:
+                # downscale by 2x
+                self.output_frame = cv2.resize(self.output_frame, dsize=(0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_NEAREST)
+                min_dim //= 2
+
+            if min_dim < 400:  # test on height
                 dotrad = 3
                 fontscale = 0.4
                 fontthick = 1
@@ -1408,7 +1566,7 @@ class VisionServer:
 
             # If test mode (ie running the NT server), give a warning
             if self.test_mode:
-                cv2.putText(self.output_frame, "TEST MODE", (5, image_shape[0]-5), cv2.FONT_HERSHEY_SIMPLEX,
+                cv2.putText(self.output_frame, "TEST MODE", (5, self.output_frame.shape[0]-5), cv2.FONT_HERSHEY_SIMPLEX,
                             fontscale, (0, 255, 255), thickness=fontthick)
 
         except Exception as e:
@@ -1427,46 +1585,45 @@ class VisionServer:
         imgproc_nettime = 0
 
         # NetworkTables.addEntryListener(self.active_mode_changed)
-        # old_ts = datetime.timestamp(datetime.now())
-        # mode_idx=2
-        # mode = ["shooter", "intake", "ballfinder", "goalfinder", "c930e"]
-        # mode_period = [5, 5, 40, 5, 40]
+        old_ts = datetime.timestamp(datetime.now())
+        mode_idx=0
+        mode = ["shooter","intake","arm","fisheye"]# "intake", "ballfinder", , "c930e"
+        mode_period = [20,20,20,20]
 
 
         while True:
             try:
                 # Check whether DS has asked for a different camera
 
-                # now = datetime.now()
-                # timestamp = datetime.timestamp(now)
-                # if timestamp - old_ts > mode_period[(mode_idx -1 ) % 5] :
-                #     self.switch_mode(mode[mode_idx % 5])
-                #     mode_idx += 1
-                #     old_ts = timestamp
+                timestamp = datetime.timestamp(datetime.now())
+                if timestamp - old_ts > mode_period[(mode_idx -1 ) % 4] :
+                    self.switch_mode(mode[mode_idx % 4])
+                    mode_idx += 1
+                    old_ts = timestamp
 
-                nt_mode = nt_active_mode
+                nt_mode = self.nt_active_mode
 
-                if nt_mode != self.active_mode:
-                    self.switch_mode(nt_mode)
+                # if nt_mode != self.active_mode:
+                #     self.switch_mode(nt_mode)
 
                 if self.tuning:
                     self.update_parameters()
 
                 # Tell the CvReader to grab a frame from the camera and put it
                 # in the source image.  Frametime==0 on error
-                frametime, self.camera_frame = self.current_reader.next_frame()
+                frametime, self.camera_frame = self.active_camera.next_frame()
                 frame_num += 1
 
                 imgproc_startt = time.time()
 
                 if frametime == 0:
                     # ERROR!!
-                    self.error_msg = self.current_reader.sink.getError()
+                    self.error_msg = self.active_camera.sink.getError()
 
                     if errors < 10:
                         errors += 1
-                    else:   # if 10 or more iterations without any stream switch cameras
-                        logging.warning(self.active_camera + " camera is no longer streaming. Switching cameras...")
+                    else:   # if 10 or more iterations without any stream, switch cameras
+                        logging.warning(self.active_camera.get_name() + " camera is no longer streaming. Switching cameras...")
                         # self.switch_mode(self.mode_after_error())
                         errors = 0
 
@@ -1479,7 +1636,7 @@ class VisionServer:
                     if self.image_writer_state:
                         self.image_writer.setImage(self.camera_frame)
 
-                    # frametime = time.time() * 1e8  (ie in 1/100 microseconds)
+                    # frametime = time() * 1e8  (ie in 1/100 microseconds)
                     # convert frametime to seconds to use as the heartbeat sent to the RoboRio
                     target_res = [1e-8 * frametime, ]
                     
@@ -1499,15 +1656,13 @@ class VisionServer:
                 NetworkTables.flush()
 
                 # Done. Output the marked up image, if needed
-                # Note this can also be done via the URL, but this is more efficient
+                # Note this rate limiting can also be done via the URL, but this is more efficient
                 now = time.time()
                 deltat = now - self.previous_output_time
                 min_deltat = 1.0 / self.output_fps_limit
                 if deltat >= min_deltat:
                     self.prepare_output_image()
-                    resized = cv2.resize(self.output_frame, (416, 240), interpolation = cv2.INTER_AREA)
-                    self.output_stream.putFrame(resized)
-                    # cv2.imshow("Frame", self.output_frame)
+                    self.output_stream.putFrame(self.output_frame)
                     self.previous_output_time = now
 
                 if frame_num == 30:
@@ -1558,12 +1713,6 @@ class VisionServer:
 
             file_index = (file_index + 1) % len(file_list)
         return
-
-    def active_mode_changed(key, value, isNew, isParamNew):
-        print("valueChanged: key: '%s'; value: %s; isNew: %s; isParamNew: %s" % (key, value, isNew, isParamNew))
-
-        if value == "/vision/active_mode":
-            self.switch_mode(value)
 
 # -----------------------------------------------------------------------------
 def wait_on_nt_connect(max_delay=10):
@@ -1639,33 +1788,28 @@ class VisionServer2020(VisionServer):
     # rrtarget_exposure = ntproperty('/vision/rrtarget/exposure', 0, doc='Camera exposure for rrtarget (0=auto)')
 
     def __init__(self, CALIB_STRING, test_mode=False):
-        super().__init__(initial_mode='c930e', test_mode=test_mode)
+        super().__init__(initial_mode='shooter', test_mode=test_mode)
 
-        self.camera_device_shooter = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-video-index0'    # for line and hatch processing
-        self.camera_device_intake = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-video-index0'    # for line and hatch processing
-        self.camera_device_c930e = '/dev/v4l/by-id/usb-046d_Logitech_Webcam_C930e_9A1D132E-video-index0'
         self.add_cameras()
 
-        self.generic_finder = GenericFinder("shooter", "shooter", finder_id=4.0)
-        self.add_target_finder(self.generic_finder)
+        self.generic_fisheye = GenericFinder("fisheye", "fisheye", finder_id=4.0)
+        self.add_target_finder(self.generic_fisheye)
 
-        self.generic_finder_intake = GenericFinder("intake", "intake", finder_id=5.0)
-        self.add_target_finder(self.generic_finder_intake)
+        self.generic_arm = CountDownFinder("arm", "arm", finder_id=5.0)
+        self.add_target_finder(self.generic_arm)
 
-        self.goal_finder = GoalFinder2020(CALIB_STRING)
+        cam = self.cameras['shooter']
+        self.goal_finder = GoalFinder2020(CALIB_STRING) #C930E_CALIB_STRING
         self.add_target_finder(self.goal_finder)
 
-        self.ball_finder = BallFinder2020(CALIB_STRING)
+        cam = self.cameras['intake']
+        self.ball_finder = BallFinder2020(C930E_CALIB_STRING)
         self.add_target_finder(self.ball_finder)
-
-        self.c930e_finder = BallFinder2020(C930E_CALIB_STRING, 'c930e', 'c930e', finder_id=3.0)
-        self.add_target_finder(self.c930e_finder)
-
 
         self.update_parameters()
 
         # start in intake mode to get cameras going. Will switch to 'shooter' after 1 sec.
-        self.switch_mode('c930e')
+        self.switch_mode('shooter')
         return
 
     def update_parameters(self):
@@ -1674,17 +1818,29 @@ class VisionServer2020(VisionServer):
 
         # Make sure to add any additional created properties which should be changeable
 
-        # self.goal_finder.set_color_thresholds(self.rrtarget_hue_low_limit, self.rrtarget_hue_high_limit,
-        #                                       self.rrtarget_saturation_low_limit, self.rrtarget_saturation_high_limit,
-        #                                       self.rrtarget_value_low_limit, self.rrtarget_value_high_limit)
+        # self.goal_finder.set_color_thresholds(65, 100,
+        #                                       75, 255,
+        #                                       15, 255)
         return
-
     def add_cameras(self):
         '''Add the cameras'''
+        
+        self.camera_device_1 = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-video-index0'    # for line and hatch processing
+        self.camera_device_2 = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2:1.0-video-index0'    # for line and hatch processing
+        self.camera_device_3 = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-video-index0'    # for line and hatch processing
+        self.camera_device_4 = '/dev/v4l/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4:1.0-video-index0'    # for line and hatch processing
+        
+        cam = Camera(self.camera_server, 'shooter', self.camera_device_2, width=424, height=240)
+        self.add_camera(cam, True)
 
-        self.add_camera('shooter', self.camera_device_shooter, True)
-        self.add_camera('intake', self.camera_device_intake, False)
-        self.add_camera('c930e', self.camera_device_c930e, False)
+        cam = LogitechC930e(self.camera_server, 'intake', self.camera_device_4, width=424, height=240)
+        self.add_camera(cam, False)
+
+        cam = Camera(self.camera_server, 'arm', self.camera_device_1, width=424, height=240)
+        self.add_camera(cam, False)
+
+        cam = Camera(self.camera_server, 'fisheye', self.camera_device_3, width=640, height=480)
+        self.add_camera(cam, False)
         return
 
 # Main routine
